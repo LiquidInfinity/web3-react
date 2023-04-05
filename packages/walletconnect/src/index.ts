@@ -2,8 +2,8 @@ import type WalletConnectProvider from '@walletconnect/ethereum-provider'
 import type { IWCEthRpcConnectionOptions } from '@walletconnect/types'
 import type { Actions, ProviderRpcError } from '@web3-react/types'
 import { Connector } from '@web3-react/types'
-import EventEmitter3 from 'eventemitter3'
-import type { EventEmitter } from 'node:events'
+import EventEmitter from 'eventemitter3'
+
 import { getBestUrl } from './utils'
 
 export const URI_AVAILABLE = 'URI_AVAILABLE'
@@ -45,7 +45,7 @@ export interface ActivateOptions {
 export class WalletConnect extends Connector {
   /** {@inheritdoc Connector.provider} */
   public provider?: MockWalletConnectProvider
-  public readonly events = new EventEmitter3()
+  public readonly events = new EventEmitter()
 
   private readonly options: Omit<WalletConnectOptions, 'rpc'>
   private readonly rpc: { [chainId: number]: string[] }
@@ -125,15 +125,13 @@ export class WalletConnect extends Connector {
       await this.isomorphicInitialize()
       if (!this.provider?.connected) throw Error('No existing connection')
 
-      // for walletconnect, we always use sequential instead of parallel fetches because otherwise
-      // chainId defaults to 1 even if the connecting wallet isn't on mainnet
-      const accounts = await this.provider?.request<string[]>({ method: 'eth_accounts' })
+      // Wallets may resolve eth_chainId and hang on eth_accounts pending user interaction, which may include changing
+      // chains; they should be requested serially, with accounts first, so that the chainId can settle.
+      const accounts = await this.provider.request<string[]>({ method: 'eth_accounts' })
       if (!accounts.length) throw new Error('No accounts returned')
-      const chainId = await this.provider
-        .request<string | number>({ method: 'eth_chainId' })
-        .then((chainId) => parseChainId(chainId))
+      const chainId = await this.provider.request<string>({ method: 'eth_chainId' })
 
-      this.actions.update({ chainId, accounts })
+      this.actions.update({ chainId: parseChainId(chainId), accounts })
     } catch (error) {
       cancelActivation()
       throw error
@@ -147,7 +145,7 @@ export class WalletConnect extends Connector {
     // this early return clause catches some common cases if activate is called after connection has been established
     if (this.provider?.connected) {
       if (!desiredChainId || desiredChainId === this.provider.chainId) return
-      // beacuse the provider is already connected, we can ignore the suppressUserPrompts
+      // because the provider is already connected, we can ignore the suppressUserPrompts
       return this.provider.request<void>({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: `0x${desiredChainId.toString(16)}` }],
@@ -161,21 +159,29 @@ export class WalletConnect extends Connector {
 
     try {
       await this.isomorphicInitialize(desiredChainId)
+      if (!this.provider) throw new Error('No provider')
 
+      // Wallets may resolve eth_chainId and hang on eth_accounts pending user interaction, which may include changing
+      // chains; they should be requested serially, with accounts first, so that the chainId can settle.
       const accounts = await this.provider
-        ?.request<string[]>({ method: 'eth_requestAccounts' })
+        .request<string[]>({ method: 'eth_requestAccounts' })
         // if a user triggers the walletconnect modal, closes it, and then tries to connect again,
         // the modal will not trigger. by deactivating when this happens, we prevent the bug.
         .catch(async (error: Error) => {
           if (error?.message === 'User closed modal') await this.deactivate()
           throw error
         })
-
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const chainId = await this.provider!.request<string | number>({ method: 'eth_chainId' }).then((chainId) =>
-        parseChainId(chainId)
-      )
-
+      const chainId = parseChainId(await this.provider.request<string>({ method: 'eth_chainId' }))
+      /**
+       * TODO(INFRA-140): It is possible that the user has changed the chain in the wallet while the modal was open.
+       * In that case, WalletConnect will not update the RPC endpoint to the one configured for that chain.
+       * Unfortunately, there's no public API to set the `rpc` endpoint, rather than calling private `setHttpProvider`.
+       * We should remove this once the underlying bug is resolved upstream.
+       */
+      if (chainId !== desiredChainId) {
+        // @ts-ignore
+        this.provider.http = this.provider.setHttpProvider(chainId)
+      }
       this.actions.update({ chainId, accounts })
     } catch (error) {
       cancelActivation()

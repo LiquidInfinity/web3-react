@@ -2,6 +2,7 @@ import type { JsonRpcProvider } from '@ethersproject/providers'
 import type { ConnectionInfo } from '@ethersproject/web'
 import type { Actions } from '@web3-react/types'
 import { Connector } from '@web3-react/types'
+
 import { getBestProvider } from './utils'
 
 type url = string | ConnectionInfo
@@ -49,7 +50,7 @@ export class Network extends Connector {
       if (Array.isArray(urls)) {
         accumulator[Number(chainId)] = urls
       } else {
-        // thie ternary just makes typescript happy, since it can't infer that the array has elements of the same type
+        // this ternary just makes typescript happy, since it can't infer that the array has elements of the same type
         accumulator[Number(chainId)] = isUrl(urls) ? [urls] : [urls]
       }
 
